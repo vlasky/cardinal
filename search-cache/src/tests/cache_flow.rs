@@ -33,6 +33,7 @@ fn dirty_flag_tracks_mutations_and_is_cleared_by_flush() {
     let tmp = TempDir::new("dirty_flag").unwrap();
     let file = tmp.path().join("a.txt");
     fs::write(&file, b"x").unwrap();
+    fs::write(tmp.path().join("c.txt"), b"z").unwrap();
     let mut cache = SearchCache::walk_fs(tmp.path());
     assert!(
         cache.is_dirty(),
@@ -57,16 +58,16 @@ fn dirty_flag_tracks_mutations_and_is_cleared_by_flush() {
     cache.flush_snapshot_to_file(&db).unwrap();
     assert!(!cache.is_dirty());
 
-    // Lazily fetched metadata is persisted too, so fetching it dirties the index.
-    fs::write(tmp.path().join("b.txt"), b"y").unwrap();
-    let id = cache.last_event_id() + 1;
-    cache
-        .handle_fs_events(vec![FsEvent {
-            path: tmp.path().join("b.txt"),
-            id,
-            flag: EventFlag::ItemCreated,
-        }])
-        .unwrap();
+    // Lazily fetched metadata is persisted too, so fetching it dirties the index. `c.txt`
+    // comes from the initial walk, which does not fetch metadata.
+    let c_index = cache.search("c.txt").unwrap();
+    assert_eq!(c_index.len(), 1);
+    let expanded = cache.expand_file_nodes(&c_index);
+    assert!(
+        expanded[0].metadata.is_some(),
+        "expanding a row fetches its metadata"
+    );
+    assert!(cache.is_dirty(), "fetching lazy metadata dirties the index");
     cache.flush_snapshot_to_file(&db).unwrap();
     assert!(!cache.is_dirty());
 
