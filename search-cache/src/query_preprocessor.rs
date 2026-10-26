@@ -110,8 +110,10 @@ fn strip_term_quotes(term: Term) -> Term {
 /// The documented syntax says `"*.rs"` searches for the literal text `*.rs`, but after plain
 /// quote stripping the segment matcher could no longer tell it apart from the wildcard `*.rs`
 /// and matched every `.rs` file. Quoted `*` / `?` are therefore emitted as `\*` / `\?`, which
-/// `segment.rs` treats as literal characters. Only name tokens use this; filter arguments keep
-/// plain stripping because their values are not wildcard patterns.
+/// `segment.rs` treats as literal characters. Literal backslashes are emitted as `\\` for the
+/// same reason, so a user-typed `foo\*.txt` still means a backslash followed by a wildcard.
+/// Only name tokens use this; filter arguments keep plain stripping because their values are
+/// not wildcard patterns.
 pub(crate) fn strip_word_quotes(value: &str) -> String {
     if !value.contains('"') && !value.contains('\\') {
         return value.to_string();
@@ -123,10 +125,16 @@ pub(crate) fn strip_word_quotes(value: &str) -> String {
     while let Some(ch) = chars.next() {
         match ch {
             '\\' => match chars.peek().copied() {
-                Some('\\') | Some('"') => {
-                    result.push(chars.next().expect("peeked value exists"));
+                // `\"` is the parser's quote escape: a literal quote character.
+                Some('"') => result.push(chars.next().expect("peeked value exists")),
+                // `\\` is a literal backslash, and so is a backslash before anything else.
+                // Both are emitted escaped so the matcher can tell them apart from the
+                // `\*` / `\?` escapes generated for quoted wildcards below.
+                Some('\\') => {
+                    chars.next();
+                    result.push_str("\\\\");
                 }
-                _ => result.push(ch),
+                _ => result.push_str("\\\\"),
             },
             '"' => in_quotes = !in_quotes,
             '*' | '?' if in_quotes => {
@@ -751,6 +759,17 @@ mod tests {
     }
 
     #[test]
+    fn user_backslashes_are_escaped_so_a_following_wildcard_stays_a_wildcard() {
+        // The user typed `foo\*.txt`: a literal backslash, then a wildcard.
+        let query = parse_query("foo\\*.txt").expect("valid");
+        let stripped = strip_query_quotes(query);
+        match stripped.expr {
+            Expr::Term(Term::Word(word)) => assert_eq!(word, "foo\\\\*.txt"),
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+    }
+
+    #[test]
     fn unquoted_wildcards_are_untouched() {
         let query = parse_query("*.rs").expect("valid");
         let stripped = strip_query_quotes(query);
@@ -870,7 +889,9 @@ mod tests {
         let query = parse_query(r#""C:\\path""#).expect("valid");
         let stripped = strip_query_quotes(query);
         match stripped.expr {
-            Expr::Term(Term::Word(word)) => assert_eq!(word, r"C:\path"),
+            // One literal backslash, carried in escaped form (`\\`) for the segment matcher,
+            // which decodes it back to a single `\`.
+            Expr::Term(Term::Word(word)) => assert_eq!(word, r"C:\\path"),
             other => panic!("Unexpected expr: {other:?}"),
         }
     }
@@ -890,7 +911,8 @@ mod tests {
         let query = parse_query(r#""a\bc""#).expect("valid");
         let stripped = strip_query_quotes(query);
         match stripped.expr {
-            Expr::Term(Term::Word(word)) => assert_eq!(word, "a\\bc"),
+            // `\b` is not an escape: a literal backslash (escaped form) followed by `b`.
+            Expr::Term(Term::Word(word)) => assert_eq!(word, r"a\\bc"),
             other => panic!("Unexpected expr: {other:?}"),
         }
     }
@@ -900,7 +922,8 @@ mod tests {
         let query = parse_query(r#""C\\\\path""#).expect("valid");
         let stripped = strip_query_quotes(query);
         match stripped.expr {
-            Expr::Term(Term::Word(word)) => assert_eq!(word, "C\\\\path"),
+            // Two literal backslashes, each carried in escaped form.
+            Expr::Term(Term::Word(word)) => assert_eq!(word, r"C\\\\path"),
             other => panic!("Unexpected expr: {other:?}"),
         }
     }

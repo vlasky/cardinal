@@ -133,7 +133,7 @@ fn literal_chunks(value: &str) -> Vec<String> {
     let mut chars = trimmed.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' if matches!(chars.peek(), Some('*') | Some('?')) => {
+            '\\' if matches!(chars.peek(), Some('*') | Some('?') | Some('\\')) => {
                 current.push(chars.next().expect("peeked value exists"));
             }
             '*' | '?' => {

@@ -43,15 +43,16 @@ impl SegmentMatcherConcrete {
 
 /// Splits a segment value into (has_unescaped_wildcard, literal_text).
 ///
-/// `\*` and `\?` denote literal characters (the query preprocessor emits them for quoted
-/// tokens such as `"*.rs"`); every other backslash is an ordinary character.
+/// `\*`, `\?` and `\\` denote literal characters (the query preprocessor emits `\*` / `\?` for
+/// quoted wildcards such as `"*.rs"` and `\\` for every literal backslash); any other
+/// backslash is an ordinary character.
 fn unescape_wildcards(value: &str) -> (bool, String) {
     let mut has_wildcard = false;
     let mut literal = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' if matches!(chars.peek(), Some('*') | Some('?')) => {
+            '\\' if matches!(chars.peek(), Some('*') | Some('?') | Some('\\')) => {
                 literal.push(chars.next().expect("peeked value exists"));
             }
             '*' | '?' => {
@@ -71,8 +72,8 @@ fn wildcard_to_regex(pattern: &str) -> String {
     let mut chars = pattern.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' if matches!(chars.peek(), Some('*') | Some('?')) => {
-                // Escaped wildcard: match the character literally.
+            '\\' if matches!(chars.peek(), Some('*') | Some('?') | Some('\\')) => {
+                // Escaped wildcard or backslash: match the character literally.
                 let literal = chars.next().expect("peeked value exists");
                 regex.push_str(&regex::escape(literal.encode_utf8(&mut buf)));
             }
@@ -690,6 +691,16 @@ mod tests {
         assert_eq!(unescape_wildcards("\\*x*"), (true, "*x*".to_string()));
         // Other backslashes are ordinary characters.
         assert_eq!(unescape_wildcards("a\\b"), (false, "a\\b".to_string()));
+        // `\\` is a literal backslash; a wildcard after it is still a wildcard
+        // (the preprocessor emits this for a user-typed `foo\*.txt`).
+        assert_eq!(
+            unescape_wildcards("foo\\\\*.txt"),
+            (true, "foo\\*.txt".to_string())
+        );
+        let regex = regex::Regex::new(&super::wildcard_to_regex("foo\\\\*.txt")).unwrap();
+        assert!(regex.is_match("foo\\report.txt"));
+        assert!(!regex.is_match("foo*.txt"));
+        assert!(!regex.is_match("foo_x.txt"));
     }
 
     #[test]
