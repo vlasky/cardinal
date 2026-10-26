@@ -93,7 +93,24 @@ fn strip_term_quotes(term: Term) -> Term {
         Term::Word(word) => Term::Word(strip_word_quotes(&word)),
         Term::Filter(mut filter) => {
             if let Some(arg) = &mut filter.argument {
-                arg.raw = strip_query_quotes_text(&arg.raw);
+                // `file:` / `folder:` arguments and the optional name pattern of the type
+                // macros (`audio:report*`) are matched through the same segment matcher as
+                // bare words, so they need the same escaping form (quoted wildcards literal,
+                // backslashes escaped). Every other filter keeps plain stripping: their values
+                // are not wildcard patterns and never reach the matcher's decoder.
+                arg.raw = if matches!(
+                    filter.kind,
+                    FilterKind::File
+                        | FilterKind::Folder
+                        | FilterKind::Audio
+                        | FilterKind::Video
+                        | FilterKind::Doc
+                        | FilterKind::Exe
+                ) {
+                    strip_word_quotes(&arg.raw)
+                } else {
+                    strip_query_quotes_text(&arg.raw)
+                };
                 // Also strip quotes from list values
                 if let ArgumentKind::List(values) = &mut arg.kind {
                     *values = values.iter().map(|v| strip_query_quotes_text(v)).collect();
@@ -786,6 +803,27 @@ mod tests {
         match stripped.expr {
             Expr::Term(Term::Filter(filter)) => {
                 assert_eq!(filter.argument.expect("argument").raw, "a*b");
+            }
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_and_folder_arguments_use_word_escaping() {
+        // These arguments are matched by the segment matcher, which decodes `\\` and `\*`,
+        // so they must be encoded exactly like bare words: a quoted star stays literal and
+        // two typed backslashes (`\\\\` in the query) become two escaped literal backslashes.
+        let query = parse_query("file:\"*.rs\"").expect("valid");
+        match strip_query_quotes(query).expr {
+            Expr::Term(Term::Filter(filter)) => {
+                assert_eq!(filter.argument.expect("argument").raw, "\\*.rs");
+            }
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+        let query = parse_query(r#"folder:"a\\\\b""#).expect("valid");
+        match strip_query_quotes(query).expr {
+            Expr::Term(Term::Filter(filter)) => {
+                assert_eq!(filter.argument.expect("argument").raw, r"a\\\\b");
             }
             other => panic!("Unexpected expr: {other:?}"),
         }

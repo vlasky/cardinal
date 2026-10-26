@@ -272,3 +272,50 @@ fn quoted_wildcards_are_literal_and_user_backslashes_survive() {
         );
     }
 }
+
+#[test]
+fn file_and_folder_filters_match_literal_backslashes_and_quoted_wildcards() {
+    let temp_dir = TempDir::new("type_filters_backslashes").unwrap();
+    let dir = temp_dir.path();
+    fs::create_dir(dir.join("a\\\\b")).unwrap(); // folder named a\\b (two backslashes)
+    fs::File::create(dir.join("a\\\\b").join("inner.txt")).unwrap();
+    fs::File::create(dir.join("foo*.txt")).unwrap();
+    fs::File::create(dir.join("foo_x.txt")).unwrap();
+
+    let mut cache = SearchCache::walk_fs(dir);
+    let names = |cache: &mut SearchCache, query: &str, case_insensitive: bool| -> Vec<String> {
+        let opts = SearchOptions { case_insensitive };
+        let indices =
+            guard_indices(cache.search_with_options(query, opts, CancellationToken::noop()));
+        let mut names: Vec<String> = cache
+            .expand_file_nodes(&indices)
+            .into_iter()
+            .map(|node| {
+                node.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    };
+
+    for case_insensitive in [false, true] {
+        // Two typed backslashes inside quotes (`\\\\`) match a folder with two backslashes.
+        assert_eq!(
+            names(&mut cache, "folder:\"a\\\\\\\\b\"", case_insensitive),
+            vec!["a\\\\b"]
+        );
+        // A quoted wildcard in a file: argument is literal; unquoted it is a wildcard.
+        assert_eq!(
+            names(&mut cache, "file:\"foo*.txt\"", case_insensitive),
+            vec!["foo*.txt"]
+        );
+        assert_eq!(
+            names(&mut cache, "file:foo*.txt", case_insensitive),
+            vec!["foo*.txt", "foo_x.txt"]
+        );
+    }
+}
