@@ -98,15 +98,7 @@ fn strip_term_quotes(term: Term) -> Term {
                 // bare words, so they need the same escaping form (quoted wildcards literal,
                 // backslashes escaped). Every other filter keeps plain stripping: their values
                 // are not wildcard patterns and never reach the matcher's decoder.
-                arg.raw = if matches!(
-                    filter.kind,
-                    FilterKind::File
-                        | FilterKind::Folder
-                        | FilterKind::Audio
-                        | FilterKind::Video
-                        | FilterKind::Doc
-                        | FilterKind::Exe
-                ) {
+                arg.raw = if filter_uses_word_encoding(&filter.kind) {
                     strip_word_quotes(&arg.raw)
                 } else {
                     strip_query_quotes_text(&arg.raw)
@@ -157,6 +149,39 @@ pub(crate) fn strip_word_quotes(value: &str) -> String {
             '*' | '?' if in_quotes => {
                 result.push('\\');
                 result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
+/// Filters whose argument is a name pattern evaluated by the segment matcher (`file:`,
+/// `folder:` and the type macros' optional pattern). Their arguments carry the same encoding
+/// as bare words; see [`strip_word_quotes`].
+pub(crate) fn filter_uses_word_encoding(kind: &FilterKind) -> bool {
+    matches!(
+        kind,
+        FilterKind::File
+            | FilterKind::Folder
+            | FilterKind::Audio
+            | FilterKind::Video
+            | FilterKind::Doc
+            | FilterKind::Exe
+    )
+}
+
+/// Decodes the word encoding produced by [`strip_word_quotes`] into plain text: `\\` -> `\`,
+/// `\*` -> `*`, `\?` -> `?`. Used where the whole value is literal (highlight terms for
+/// quoted phrases); the segment matcher has its own decoder that also keeps track of which
+/// `*` / `?` are real wildcards.
+pub(crate) fn decode_word_escapes(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if matches!(chars.peek(), Some('*') | Some('?') | Some('\\')) => {
+                result.push(chars.next().expect("peeked value exists"));
             }
             _ => result.push(ch),
         }

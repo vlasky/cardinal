@@ -33,16 +33,28 @@ impl HighlightCollector {
             Term::Word(word) => self.collect_text(word),
             Term::Filter(filter) => {
                 if let Some(argument) = &filter.argument {
-                    self.collect_argument(argument);
+                    self.collect_argument(&filter.kind, argument);
                 }
             }
             Term::Regex(_) => {}
         }
     }
 
-    fn collect_argument(&mut self, argument: &FilterArgument) {
+    fn collect_argument(&mut self, kind: &cardinal_syntax::FilterKind, argument: &FilterArgument) {
+        // Arguments of matcher-backed filters (`file:"*.rs"`) arrive in the word encoding, in
+        // which `\*`, `\?` and `\\` are literal characters; decode a quoted phrase so the
+        // highlight term is the text that actually matched. Bare arguments go through
+        // `literal_chunks`, which understands the encoding already.
+        let decode = crate::query_preprocessor::filter_uses_word_encoding(kind);
         match &argument.kind {
             ArgumentKind::Bare => self.collect_text(argument.raw.as_str()),
+            ArgumentKind::Phrase if decode => {
+                // Already quote-stripped and encoded by the preprocessor: decode only.
+                let decoded = crate::query_preprocessor::decode_word_escapes(argument.raw.trim());
+                if !decoded.is_empty() {
+                    self.push(decoded);
+                }
+            }
             ArgumentKind::Phrase => self.collect_literal_text(argument.raw.as_str()),
             ArgumentKind::List(values) => {
                 for value in values {
@@ -1702,6 +1714,19 @@ mod tests {
     fn test_multiple_quoted_phrases() {
         let terms = parse_and_highlight("\"hello world\" \"foo bar\"").unwrap();
         assert_eq!(terms, vec!["foo bar", "hello world"]);
+    }
+
+    #[test]
+    fn test_matcher_filter_phrase_arguments_are_decoded() {
+        // `file:` / `folder:` arguments carry the word encoding; the highlight term must be
+        // the decoded literal text, not the encoded form.
+        let terms = parse_and_highlight("file:\"*.rs\"").unwrap();
+        assert_eq!(terms, vec!["*.rs"]);
+        let terms = parse_and_highlight(r#"folder:"a\\\\b""#).unwrap();
+        assert_eq!(terms, vec![r"a\\b"]);
+        // Non-matcher filters are untouched.
+        let terms = parse_and_highlight("content:\"a*b\"").unwrap();
+        assert_eq!(terms, vec!["a*b"]);
     }
 
     #[test]
