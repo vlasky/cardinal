@@ -41,20 +41,17 @@ impl HighlightCollector {
     }
 
     fn collect_argument(&mut self, kind: &cardinal_syntax::FilterKind, argument: &FilterArgument) {
-        // Arguments of matcher-backed filters (`file:"*.rs"`) arrive in the word encoding, in
-        // which `\*`, `\?` and `\\` are literal characters; decode a quoted phrase so the
-        // highlight term is the text that actually matched. Bare arguments go through
-        // `literal_chunks`, which understands the encoding already.
-        let decode = crate::query_preprocessor::filter_uses_word_encoding(kind);
+        // The matcher evaluates a `file:` / `folder:` / type-macro argument as one name
+        // pattern (`evaluate_phrase(&arg.raw)`), whatever the parser classified it as, and the
+        // preprocessor gives it the same encoding as a bare word. Highlight it exactly like a
+        // bare word, so partial quotes (`file:"foo"*`), lists and globstars behave
+        // identically to their unquoted forms.
+        if crate::query_preprocessor::filter_uses_word_encoding(kind) {
+            self.collect_text(argument.raw.as_str());
+            return;
+        }
         match &argument.kind {
             ArgumentKind::Bare => self.collect_text(argument.raw.as_str()),
-            ArgumentKind::Phrase if decode => {
-                // Already quote-stripped and encoded by the preprocessor: decode only.
-                let decoded = crate::query_preprocessor::decode_word_escapes(argument.raw.trim());
-                if !decoded.is_empty() {
-                    self.push(decoded);
-                }
-            }
             ArgumentKind::Phrase => self.collect_literal_text(argument.raw.as_str()),
             ArgumentKind::List(values) => {
                 for value in values {
@@ -1724,6 +1721,15 @@ mod tests {
         assert_eq!(terms, vec!["*.rs"]);
         let terms = parse_and_highlight(r#"folder:"a\\\\b""#).unwrap();
         assert_eq!(terms, vec![r"a\\b"]);
+        // Same rules as bare words: a partial quote followed by a wildcard chunks on the
+        // wildcard, a trailing globstar segment contributes nothing, and a list is one
+        // literal pattern (that is how the matcher evaluates it).
+        let terms = parse_and_highlight("file:\"foo\"*").unwrap();
+        assert_eq!(terms, vec!["foo"]);
+        let terms = parse_and_highlight("file:\"Application Support\"/**").unwrap();
+        assert!(terms.is_empty(), "{terms:?}");
+        let terms = parse_and_highlight("file:\"*.rs\";\"*.txt\"").unwrap();
+        assert_eq!(terms, vec!["*.rs;*.txt"]);
         // Non-matcher filters are untouched.
         let terms = parse_and_highlight("content:\"a*b\"").unwrap();
         assert_eq!(terms, vec!["a*b"]);

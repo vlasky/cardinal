@@ -171,24 +171,6 @@ pub(crate) fn filter_uses_word_encoding(kind: &FilterKind) -> bool {
     )
 }
 
-/// Decodes the word encoding produced by [`strip_word_quotes`] into plain text: `\\` -> `\`,
-/// `\*` -> `*`, `\?` -> `?`. Used where the whole value is literal (highlight terms for
-/// quoted phrases); the segment matcher has its own decoder that also keeps track of which
-/// `*` / `?` are real wildcards.
-pub(crate) fn decode_word_escapes(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' if matches!(chars.peek(), Some('*') | Some('?') | Some('\\')) => {
-                result.push(chars.next().expect("peeked value exists"));
-            }
-            _ => result.push(ch),
-        }
-    }
-    result
-}
-
 pub(crate) fn strip_query_quotes_text(value: &str) -> String {
     if !value.contains('"') && !value.contains('\\') {
         return value.to_string();
