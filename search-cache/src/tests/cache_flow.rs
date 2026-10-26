@@ -29,6 +29,59 @@ fn test_node_path_root_and_child() {
 }
 
 #[test]
+fn dirty_flag_tracks_mutations_and_is_cleared_by_flush() {
+    let tmp = TempDir::new("dirty_flag").unwrap();
+    let file = tmp.path().join("a.txt");
+    fs::write(&file, b"x").unwrap();
+    let mut cache = SearchCache::walk_fs(tmp.path());
+    assert!(
+        cache.is_dirty(),
+        "a freshly walked index has never been persisted"
+    );
+
+    let db = tmp.path().join("cache.db");
+    cache.flush_snapshot_to_file(&db).unwrap();
+    assert!(!cache.is_dirty(), "a successful flush clears the flag");
+
+    // A deletion marks the index dirty.
+    fs::remove_file(&file).unwrap();
+    let id = cache.last_event_id() + 1;
+    cache
+        .handle_fs_events(vec![FsEvent {
+            path: file.clone(),
+            id,
+            flag: EventFlag::ItemRemoved,
+        }])
+        .unwrap();
+    assert!(cache.is_dirty(), "removing a node dirties the index");
+    cache.flush_snapshot_to_file(&db).unwrap();
+    assert!(!cache.is_dirty());
+
+    // Lazily fetched metadata is persisted too, so fetching it dirties the index.
+    fs::write(tmp.path().join("b.txt"), b"y").unwrap();
+    let id = cache.last_event_id() + 1;
+    cache
+        .handle_fs_events(vec![FsEvent {
+            path: tmp.path().join("b.txt"),
+            id,
+            flag: EventFlag::ItemCreated,
+        }])
+        .unwrap();
+    cache.flush_snapshot_to_file(&db).unwrap();
+    assert!(!cache.is_dirty());
+
+    // A rescan-required event bumps the persisted rescan counter: dirty again.
+    let id = cache.last_event_id() + 1;
+    let result = cache.handle_fs_events(vec![FsEvent {
+        path: tmp.path().to_path_buf(),
+        id,
+        flag: EventFlag::RootChanged,
+    }]);
+    assert!(matches!(result, Err(crate::HandleFSEError::Rescan)));
+    assert!(cache.is_dirty(), "rescan_count is persisted state");
+}
+
+#[test]
 fn test_remove_node_path_nonexistent_returns_none() {
     let tmp = TempDir::new("remove_node_none").unwrap();
     let mut cache = SearchCache::walk_fs(tmp.path());
