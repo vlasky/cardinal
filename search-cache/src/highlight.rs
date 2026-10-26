@@ -72,29 +72,22 @@ impl HighlightCollector {
         }
 
         let segments = query_segmentation(value);
-        if let Some(segment) = segments.last() {
-            let segment = match segment {
-                Segment::Concrete(concrete) => concrete,
-                Segment::GlobStar => {
-                    // "**" does not contribute to highlight terms
-                    return;
-                }
-                Segment::Star => {
-                    // "*" does not contribute to highlight terms
-                    return;
-                }
-            };
-            let candidates = literal_chunks(segment.as_value());
-            if !candidates.is_empty() {
-                for candidate in candidates {
-                    self.push(candidate);
-                }
-                // Return last segment only(which is the filename part in a path)
-                return;
+        let Some(segment) = segments.last() else {
+            // No segments at all (e.g. a bare separator): fall back to the raw text.
+            for candidate in literal_chunks(value) {
+                self.push(candidate);
             }
-        }
-
-        for candidate in literal_chunks(value) {
+            return;
+        };
+        let segment = match segment {
+            Segment::Concrete(concrete) => concrete,
+            // "*" and "**" do not contribute to highlight terms.
+            Segment::GlobStar | Segment::Star => return,
+        };
+        // Only the last segment (the file-name part of a path) contributes. A last segment
+        // made solely of wildcards (`foo/??`) contributes nothing either; it used to fall
+        // back to chunking the whole query and emit `foo/`, which can never match a name.
+        for candidate in literal_chunks(segment.as_value()) {
             self.push(candidate);
         }
     }
@@ -1711,6 +1704,15 @@ mod tests {
     fn test_multiple_quoted_phrases() {
         let terms = parse_and_highlight("\"hello world\" \"foo bar\"").unwrap();
         assert_eq!(terms, vec!["foo bar", "hello world"]);
+    }
+
+    #[test]
+    fn test_pure_wildcard_last_segment_contributes_nothing() {
+        // `foo/??` matches two-character names under `foo`; `foo/` can never be a match.
+        assert!(parse_and_highlight("foo/??").unwrap().is_empty());
+        assert!(parse_and_highlight("foo/*?").unwrap().is_empty());
+        // A partly literal last segment still contributes its literal part.
+        assert_eq!(parse_and_highlight("foo/?x").unwrap(), vec!["x"]);
     }
 
     #[test]
