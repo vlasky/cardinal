@@ -90,7 +90,7 @@ fn strip_expr_quotes(expr: Expr) -> Expr {
 
 fn strip_term_quotes(term: Term) -> Term {
     match term {
-        Term::Word(word) => Term::Word(strip_query_quotes_text(&word)),
+        Term::Word(word) => Term::Word(strip_word_quotes(&word)),
         Term::Filter(mut filter) => {
             if let Some(arg) = &mut filter.argument {
                 arg.raw = strip_query_quotes_text(&arg.raw);
@@ -103,6 +103,40 @@ fn strip_term_quotes(term: Term) -> Term {
         }
         Term::Regex(pattern) => Term::Regex(pattern),
     }
+}
+
+/// Strips quotes from a name token while keeping quoted wildcard characters literal.
+///
+/// The documented syntax says `"*.rs"` searches for the literal text `*.rs`, but after plain
+/// quote stripping the segment matcher could no longer tell it apart from the wildcard `*.rs`
+/// and matched every `.rs` file. Quoted `*` / `?` are therefore emitted as `\*` / `\?`, which
+/// `segment.rs` treats as literal characters. Only name tokens use this; filter arguments keep
+/// plain stripping because their values are not wildcard patterns.
+pub(crate) fn strip_word_quotes(value: &str) -> String {
+    if !value.contains('"') && !value.contains('\\') {
+        return value.to_string();
+    }
+
+    let mut result = String::with_capacity(value.len() + 2);
+    let mut chars = value.chars().peekable();
+    let mut in_quotes = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.peek().copied() {
+                Some('\\') | Some('"') => {
+                    result.push(chars.next().expect("peeked value exists"));
+                }
+                _ => result.push(ch),
+            },
+            '"' => in_quotes = !in_quotes,
+            '*' | '?' if in_quotes => {
+                result.push('\\');
+                result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 pub(crate) fn strip_query_quotes_text(value: &str) -> String {
@@ -695,6 +729,45 @@ mod tests {
         let stripped = strip_query_quotes(query);
         match stripped.expr {
             Expr::Term(Term::Word(word)) => assert_eq!(word, "hello"),
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quoted_wildcards_become_literal_escapes() {
+        let query = parse_query("\"*.rs\"").expect("valid");
+        let stripped = strip_query_quotes(query);
+        match stripped.expr {
+            Expr::Term(Term::Word(word)) => assert_eq!(word, "\\*.rs"),
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+
+        let query = parse_query("\"a?b\"/**").expect("valid");
+        let stripped = strip_query_quotes(query);
+        match stripped.expr {
+            Expr::Term(Term::Word(word)) => assert_eq!(word, "a\\?b/**"),
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unquoted_wildcards_are_untouched() {
+        let query = parse_query("*.rs").expect("valid");
+        let stripped = strip_query_quotes(query);
+        match stripped.expr {
+            Expr::Term(Term::Word(word)) => assert_eq!(word, "*.rs"),
+            other => panic!("Unexpected expr: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_arguments_keep_plain_quote_stripping() {
+        let query = parse_query("content:\"a*b\"").expect("valid");
+        let stripped = strip_query_quotes(query);
+        match stripped.expr {
+            Expr::Term(Term::Filter(filter)) => {
+                assert_eq!(filter.argument.expect("argument").raw, "a*b");
+            }
             other => panic!("Unexpected expr: {other:?}"),
         }
     }

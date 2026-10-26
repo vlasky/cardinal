@@ -793,9 +793,17 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+            let before = self.pos;
             let expr = self.parse_or()?;
             if matches!(expr, Expr::Empty) {
-                break;
+                // An empty operand such as `""` contributes nothing to the conjunction, so
+                // keep parsing the rest of the query (`foo "" bar`). Breaking here used to
+                // leave `bar` unparsed and fail the whole query with "trailing characters".
+                // Bail out only if nothing was consumed, so this loop can never spin.
+                if self.pos == before {
+                    break;
+                }
+                continue;
             }
             parts.push(expr);
             if pending_keyword_and {
@@ -894,11 +902,17 @@ impl<'a> Parser<'a> {
 
     fn parse_group(&mut self, closing: char) -> Result<Expr, ParseError> {
         self.advance_char(); // consume opening token
+        let inner_start = self.pos;
         self.group_stack.push(closing);
         let expr = self.parse_and()?;
         self.group_stack.pop();
         self.skip_ws();
         if self.peek_char() == Some(closing) {
+            // `()` / `<>` with nothing inside is a syntax error. Previously this was only
+            // rejected by accident (and only when more input followed the group).
+            if self.input[inner_start..self.pos].trim().is_empty() {
+                return Err(self.error("empty group"));
+            }
             self.advance_char();
             Ok(expr)
         } else {
@@ -1056,7 +1070,13 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
 
-        if self.is_at_group_close() || matches!(self.peek_char(), Some('|')) {
+        if matches!(self.peek_char(), Some('|')) {
+            return Ok(None);
+        }
+
+        // Inside `<...>` the closer `>` is ambiguous with the comparison operator in
+        // `<size:>1gb>`. Read it as an operator when an operand follows it directly.
+        if self.is_at_group_close() && !self.closer_starts_comparison() {
             return Ok(None);
         }
 
@@ -1084,14 +1104,17 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            if self.current_closer_is(ch) {
-                break;
-            }
-
             if (ch == '<' || ch == '>') && buffer.is_empty() {
+                if self.current_closer_is(ch) && !self.closer_starts_comparison() {
+                    break;
+                }
                 buffer.push(ch);
                 self.advance_char();
                 continue;
+            }
+
+            if self.current_closer_is(ch) {
+                break;
             }
 
             if (ch == '<' || ch == '>') && !buffer.is_empty() {
@@ -1186,6 +1209,20 @@ impl<'a> Parser<'a> {
 
     fn is_at_group_close(&self) -> bool {
         matches!((self.group_stack.last(), self.peek_char()), (Some(&closer), Some(ch)) if closer == ch)
+    }
+
+    /// True when the cursor is on the current group closer `>` but an operand follows it
+    /// directly (`<size:>1gb>`), in which case it is a comparison operator rather than the
+    /// end of the group. A `>` followed by whitespace, `|`, another closer, or end of input
+    /// still closes the group.
+    fn closer_starts_comparison(&self) -> bool {
+        if !self.is_at_group_close() || self.peek_char() != Some('>') {
+            return false;
+        }
+        match self.peek_next_char() {
+            None => false,
+            Some(next) => !next.is_whitespace() && next != '|' && !self.current_closer_is(next),
+        }
     }
 
     fn remaining(&self) -> &'a str {

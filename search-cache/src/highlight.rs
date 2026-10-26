@@ -108,20 +108,44 @@ impl HighlightCollector {
     }
 }
 
+/// Splits a (quote-stripped) token into the literal pieces between wildcards.
+///
+/// `\*` / `\?` are literal characters: the query preprocessor emits them for wildcards that
+/// were inside quotes (`"*.rs"` searches for the literal text `*.rs`), so they must stay part
+/// of the chunk instead of splitting it.
 fn literal_chunks(value: &str) -> Vec<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Vec::new();
     }
 
-    let chunks: Vec<String> = trimmed
-        .split(['*', '?'])
-        .map(str::trim)
-        .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| chunk.to_string())
-        .collect();
+    fn push_chunk(chunks: &mut Vec<String>, current: &mut String) {
+        let chunk = current.trim();
+        if !chunk.is_empty() {
+            chunks.push(chunk.to_string());
+        }
+        current.clear();
+    }
 
-    if chunks.is_empty() && !trimmed.contains(['*', '?']) {
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut saw_wildcard = false;
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if matches!(chars.peek(), Some('*') | Some('?')) => {
+                current.push(chars.next().expect("peeked value exists"));
+            }
+            '*' | '?' => {
+                saw_wildcard = true;
+                push_chunk(&mut chunks, &mut current);
+            }
+            _ => current.push(ch),
+        }
+    }
+    push_chunk(&mut chunks, &mut current);
+
+    if chunks.is_empty() && !saw_wildcard {
         vec![trimmed.to_string()]
     } else {
         chunks
@@ -467,8 +491,10 @@ mod tests {
 
     #[test]
     fn test_wildcard_in_phrase() {
+        // A quoted wildcard is literal text (see search-syntax.md), so the whole phrase is
+        // one highlight term.
         let terms = parse_and_highlight("\"test * file\"").unwrap();
-        assert_eq!(terms, vec!["file", "test"]);
+        assert_eq!(terms, vec!["test * file"]);
     }
 
     #[test]
@@ -1597,8 +1623,9 @@ mod tests {
 
     #[test]
     fn test_sanitize_in_phrase() {
+        // Quoted stars are literal characters, not wildcards to sanitise away.
         let terms = parse_and_highlight("\"***test***\"").unwrap();
-        assert_eq!(terms, vec!["test"]);
+        assert_eq!(terms, vec!["***test***"]);
     }
 
     #[test]
@@ -1678,8 +1705,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quoted_with_wildcards_extracts_segments() {
+    fn test_quoted_with_wildcards_is_literal() {
         let terms = parse_and_highlight("\"test * file\"").unwrap();
+        assert_eq!(terms, vec!["test * file"]);
+        // Unquoted, the same text is a wildcard pattern and splits into literal chunks.
+        let terms = parse_and_highlight("test*file").unwrap();
         assert_eq!(terms, vec!["file", "test"]);
     }
 
@@ -1778,7 +1808,7 @@ mod tests {
     #[test]
     fn test_quoted_special_chars_preserved() {
         let terms = parse_and_highlight("\"!@#$%^&*()\"").unwrap();
-        assert_eq!(terms, vec!["!@#$%^&", "()"]);
+        assert_eq!(terms, vec!["!@#$%^&*()"]);
     }
 
     #[test]
